@@ -1,1 +1,1 @@
-# configurator
+# REST API for generalized configuration
