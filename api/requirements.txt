@@ -1,0 +1,6 @@
+Flask
+Flask-Cors
+flask_pymongo
+flask-swagger
+pymongo
+PyJWT
