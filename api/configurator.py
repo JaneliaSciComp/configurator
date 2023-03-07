@@ -9,7 +9,6 @@ import json
 import os
 import re
 from shutil import copyfile
-import ssl
 import sys
 from time import time
 import traceback
@@ -27,22 +26,26 @@ app = Flask(__name__)
 app.config.from_pyfile("config.cfg")
 CORS(app, supports_credentials=True)
 g = PyMongo(app)
+print(g.db)
 CV_optional = ['access_list', 'definition', 'display_name', 'version', 'is_current']
 app.config['STARTTIME'] = time()
 app.config['STARTDT'] = datetime.now()
+app.config['LAST_TRANSACTION'] = time()
 
 
 @app.before_request
 def before_request():
+    ''' Code to run before a request is processed
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
     app.config['REQUEST_TIME'] = time()
     app.config['COUNTER'] += 1
     endpoint = request.endpoint if request.endpoint else '(Unknown)'
     app.config['ENDPOINTS'][endpoint] = app.config['ENDPOINTS'].get(endpoint, 0) + 1
 
-
-@app.teardown_request
-def teardown_request(_):
-    pass
 
 # *****************************************************************************
 # * Classes                                                                   *
@@ -50,6 +53,12 @@ def teardown_request(_):
 
 
 class InvalidUsage(Exception):
+    ''' Class for InvalidUsage
+        Keyword arguments:
+          Exception: exception
+        Returns:
+          None
+    '''
     status_code = 400
 
     def __init__(self, message, status_code=None, payload=None):
@@ -71,13 +80,19 @@ class InvalidUsage(Exception):
 
 
 def initialize_result():
+    ''' Initialize the standard JSON return
+        Keyword arguments:
+          None
+        Returns:
+          JSON result
+    '''
     result = {"rest" : {'requester': request.remote_addr,
                         'url': request.url,
                         'endpoint': request.endpoint,
                         'error': False,
                         'elapsed_time': '',
                         'user': 'unknown'}}
-    if 'Authorization' in  request.headers:
+    if 'Authorization' in request.headers:
         token = re.sub(r'Bearer\s+', '', request.headers['Authorization'])
         try:
             dtok = decode(token, verify=False)
@@ -89,16 +104,30 @@ def initialize_result():
             message = TEMPLATE.format(type(err).__name__, err.args)
             # raise InvalidUsage(message, 500)
             print(message)
+    app.config['LAST_TRANSACTION'] = time()
     return result
 
 
 def generate_response(result):
+    ''' Generate a JSON response
+        Keyword arguments:
+          result: return result
+        Returns:
+          JSON
+    '''
     result['rest']['elapsed_time'] = str(timedelta(seconds=time() - app.config['REQUEST_TIME']))
     return jsonify(**result)
 
 
 def config_from_file(result, configtype):
-    print("In fileconf: ", configtype)
+    ''' Get a configuration from a file
+        Keyword arguments:
+          result: return result
+          configtype: configuration type
+        Returns:
+          None
+    '''
+    print(f"In config_from_file, reading {configtype}")
     result['rest']['method'] = 'file'
     filepath = app.config['CONFIG_PATH'] + configtype + '.json'
     if os.path.exists(filepath):
@@ -106,21 +135,30 @@ def config_from_file(result, configtype):
             with open(filepath, encoding="utf-8") as data_file:
                 result['config'] = json.load(data_file)
         except ValueError as valerr:
-            raise InvalidUsage("Invalid JSON: %s" % valerr)
+            raise InvalidUsage(f"Invalid JSON: {valerr}")
     else:
-        raise InvalidUsage('Configuration %s was not found on filesystem' % (configtype,), 404)
+        raise InvalidUsage(f"Configuration {configtype} was not found on filesystem", 404)
 
 
-def config_from_mongo(result, configtype, failover=1, ignore_not_found=0):
-    print(f"In mongoconf, reading {configtype}")
+def config_from_mongo(result, configtype, failover=True, ignore_not_found=False):
+    ''' Get a configuration from MongoDB
+        Keyword arguments:
+          result: return result
+          configtype: configuration type
+          failover: allow failover to file
+          ignore_not_found: do not issue error if config was not found
+        Returns:
+          None
+    '''
+    print(f"In config_from_mongo, reading {configtype}")
     result['rest']['method'] = 'mongodb'
     try:
-        data = g.db.production.find({"type": configtype})
+        data = g.db[app.config['MONGODB_COLLECTION']].find({"type": configtype})
     except pymongo.errors.PyMongoError:
         if failover:
             config_from_file(result, configtype)
         else:
-            raise InvalidUsage('Configuration %s was not found' % (configtype,), 404)
+            raise InvalidUsage(f"Configuration {configtype} was not found", 404)
     if ignore_not_found:
         return
     try:
@@ -128,14 +166,24 @@ def config_from_mongo(result, configtype, failover=1, ignore_not_found=0):
         for opt in CV_optional:
             if opt in data[0]:
                 result[opt] = data[0][opt]
-    except:
+    except Exception as ex:
         if failover:
             config_from_file(result, configtype)
         else:
-            raise InvalidUsage('Configuration %s was not found' % (configtype,), 404)
+            message = TEMPLATE.format(type(ex).__name__, ex.args)
+            raise InvalidUsage(f"Configuration {configtype} was not found " \
+                               + f"({message})", 404)
 
 
-def dump_to_file(configtype, result, backup=0):
+def dump_to_file(configtype, result, backup=False):
+    ''' Dump a configuration to a file
+        Keyword arguments:
+          configtype: configuration type
+          result: return result
+          backup: create a backup file in the "backup" directory
+        Returns:
+          None
+    '''
     filepath = app.config['CONFIG_PATH'] + configtype + '.json'
     if backup and os.path.exists(filepath):
         timestamp = datetime.fromtimestamp(time()).strftime('%Y%m%dT%H%M%S')
@@ -143,10 +191,9 @@ def dump_to_file(configtype, result, backup=0):
         try:
             copyfile(filepath, backuppath)
         except Exception as ex:
-            template = "An exception of type {0} occurred. Arguments:{1!r}"
-            message = template.format(type(ex).__name__, ex.args)
-            raise InvalidUsage('Could not export configuration for %s to %s: %s' %
-                               (configtype, backuppath, message,))
+            message = TEMPLATE.format(type(ex).__name__, ex.args)
+            raise InvalidUsage(f"Could not export configuration for {configtype} " \
+                               + f"to {backuppath}: {message}")
     try:
         with open(filepath, 'w', encoding="utf-8") as outfile:
             json.dump(result['config'], outfile, sort_keys=True, indent=4,)
@@ -155,13 +202,18 @@ def dump_to_file(configtype, result, backup=0):
         result['export_path'] = filepath
         result['export_size'] = os.path.getsize(filepath)
     except Exception as ex:
-        template = "An exception of type {0} occurred. Arguments:{1!r}"
-        message = template.format(type(ex).__name__, ex.args)
-        raise InvalidUsage('Could not export configuration for %s to %s: %s' %
-                           (configtype, filepath, message,))
+        message = TEMPLATE.format(type(ex).__name__, ex.args)
+        raise InvalidUsage(f"Could not export configuration for {configtype} " \
+                           + f"to {filepath}: {message}")
 
 
 def validate_configtype(doc):
+    ''' Validate a configuration in MongoDB against a file
+        Keyword arguments:
+          doc: document
+        Returns:
+          Validation result
+    '''
     configtype = doc['type']
     data = doc['data']
     jdata = json.dumps(data, sort_keys=True)
@@ -173,7 +225,7 @@ def validate_configtype(doc):
     jdata = json.dumps(fileresult['config'], sort_keys=True)
     jdata = jdata.encode('utf-8')
     file_md5 = hashlib.md5(jdata).hexdigest()
-    match = 1 if (data_md5 == file_md5) else 0
+    match = data_md5 == file_md5
     vresult = {configtype: match}
     return vresult
 
@@ -204,7 +256,7 @@ def spec():
 def get_doc_json():
     swag = swagger(app)
     swag['info']['version'] = "1.0"
-    swag['info']['title'] = "Configger"
+    swag['info']['title'] = "Configurator"
     return jsonify(swag)
 
 
@@ -222,16 +274,18 @@ def stats():
       400:
           description: Stats could not be calculated
     '''
+    tbt = time() - app.config['LAST_TRANSACTION']
     result = initialize_result()
     try:
         start = datetime.fromtimestamp(app.config['STARTTIME']).strftime('%Y-%m-%d %H:%M:%S')
         up_time = datetime.now() - app.config['STARTDT']
         result['stats'] = {"version": __version__,
                            "requests": app.config['COUNTER'],
-                           "start_time": start,
-                           "uptime": str(up_time),
                            "python": sys.version,
                            "pid": os.getpid(),
+                           "start_time": start,
+                           "uptime": str(up_time),
+                           "time_since_last_transaction": tbt,
                            "config_path": app.config['CONFIG_PATH'],
                            "endpoint_counts": app.config['ENDPOINTS'],
                            "user_counts": app.config['USERS'],
@@ -240,8 +294,7 @@ def stats():
                            "export_counts": app.config['EXPORTS']}
         return generate_response(result)
     except Exception as ex:
-        template = "An exception of type {0} occurred. Arguments:{1!r}"
-        message = template.format(type(ex).__name__, ex.args)
+        message = TEMPLATE.format(type(ex).__name__, ex.args)
         traceback.print_tb(ex.__traceback__)
         print(result)
         raise InvalidUsage(f"Error: {message}")
@@ -265,10 +318,9 @@ def get_validations():
     result['validations'] = {}
     result['rest']['method'] = 'mongodb'
     try:
-        data = g.db.production.find({})
+        data = g.db[app.config['MONGODB_COLLECTION']].find({})
     except Exception as ex:
-        template = "An exception of type {0} occurred. Arguments:{1!r}"
-        message = template.format(type(ex).__name__, ex.args)
+        message = TEMPLATE.format(type(ex).__name__, ex.args)
         raise InvalidUsage(f"Error: {message}")
     for doc in data:
         valresult = validate_configtype(doc)
@@ -295,12 +347,11 @@ def get_configurations():
     result['configlist'] = []
     result['rest']['method'] = 'mongodb'
     try:
-        data = g.db.production.find({}, {"_id": 0, "type": 1}).sort("type")
+        data = g.db[app.config['MONGODB_COLLECTION']].find({}, {"_id": 0, "type": 1}).sort("type")
         for doc in data:
             result['configlist'].append(doc['type'])
     except Exception as ex:
-        template = "An exception of type {0} occurred. Arguments:{1!r}"
-        message = template.format(type(ex).__name__, ex.args)
+        message = TEMPLATE.format(type(ex).__name__, ex.args)
         result['rest']['failover'] = message
         result['rest']['method'] = 'file'
         for filename in sorted(glob.glob(app.config['CONFIG_PATH'] + '*.json')):
@@ -310,7 +361,13 @@ def get_configurations():
     return generate_response(result)
 
 
-def authenticate_access(result, configtype):
+def authenticate_access(result):
+    ''' Determine if a configuration access requires authorization
+        Keyword arguments:
+          result: return result
+        Returns:
+          True or False
+    '''
     if 'access_list' in result:
         authorized_users = json.loads(result['access_list'])
         if result['rest']['user'] in authorized_users:
@@ -344,7 +401,7 @@ def get_config(configtype):
     result['rest']['configtype'] = configtype
     app.config['REQUESTS'][configtype] = app.config['REQUESTS'].get(configtype, 0) + 1
     config_from_mongo(result, configtype)
-    if not authenticate_access(result, configtype):
+    if not authenticate_access(result):
         raise InvalidUsage(f"You are not authorized to access configuration {configtype}", 401)
     result['rest']['config_length'] = len(result['config'])
     return generate_response(result)
@@ -390,7 +447,7 @@ def get_config_entry(configtype, entry):
         result['config'] = result['config'][entry]
     else:
         raise InvalidUsage(f"Entry {entry} not found in configuration {configtype}", 404)
-    if not authenticate_access(result, configtype):
+    if not authenticate_access(result):
         raise InvalidUsage(f"You are not authorized to access configuration {configtype}", 401)
     result['rest']['config_length'] = len(result['config'])
     return generate_response(result)
@@ -421,8 +478,8 @@ def export_config(configtype):
     if request.method == 'OPTIONS':
         return generate_response(result)
     app.config['EXPORTS'][configtype] = app.config['EXPORTS'].get(configtype, 0) + 1
-    config_from_mongo(result, configtype, 0)
-    if not authenticate_access(result, configtype):
+    config_from_mongo(result, configtype, False)
+    if not authenticate_access(result):
         raise InvalidUsage(f"You are not authorized to access configuration {configtype}", 401)
     dump_to_file(configtype, result)
     return generate_response(result)
@@ -461,22 +518,22 @@ def import_config(configtype):
     config_from_file(result, configtype)
     ddict = {"type": configtype, "data": result['config']}
     mongo = {"rest": {}}
-    config_from_mongo(mongo, configtype, 0, 1)
+    config_from_mongo(mongo, configtype, False, True)
     for opt in CV_optional:
         if opt in parms:
             ddict[opt] = parms[opt]
         elif opt in mongo:
             ddict[opt] = mongo[opt]
     try:
-        data = g.db.production.update_one({"type": configtype},
+        print(g.db)
+        data = g.db[app.config['MONGODB_COLLECTION']].update_one({"type": configtype},
                                           {"$set": ddict}, upsert=True)
         result['rest']['matched_count'] = data.matched_count
         result['rest']['modified_count'] = data.modified_count
         result['rest']['upserted_id'] = str(data.upserted_id)
         result['rest']['updated' if data.matched_count else 'inserted'] = 1
     except Exception as ex:
-        template = "An exception of type {0} occurred. Arguments:{1!r}"
-        message = template.format(type(ex).__name__, ex.args)
+        message = TEMPLATE.format(type(ex).__name__, ex.args)
         raise InvalidUsage(f"Could not import configuration for {configtype}: {message}")
     return generate_response(result)
 
@@ -546,17 +603,16 @@ def import_json_config(configtype):
         if this_parm in parms:
             ddict[this_parm] = parms[this_parm]
     try:
-        data = g.db.production.update_one({"type": configtype},
+        data = g.db[app.config['MONGODB_COLLECTION']].update_one({"type": configtype},
                                           {"$set": ddict}, upsert=True)
         result['rest']['matched_count'] = data.matched_count
         result['rest']['modified_count'] = data.modified_count
         result['rest']['upserted_id'] = str(data.upserted_id)
         result['rest']['updated' if data.matched_count else 'inserted'] = 1
     except Exception as ex:
-        template = "An exception of type {0} occurred. Arguments:{1!r}"
-        message = template.format(type(ex).__name__, ex.args)
+        message = TEMPLATE.format(type(ex).__name__, ex.args)
         raise InvalidUsage(f"Could not import configuration for {configtype}: {message}")
-    dump_to_file(configtype, result, 1)
+    dump_to_file(configtype, result, True)
     return generate_response(result)
 
 
@@ -615,19 +671,18 @@ def import_json_config_entry(configtype, entry):
     new_config = result['config']
     ddict = {"type": configtype, "data": new_config}
     try:
-        data = g.db.production.update_one({"type": configtype},
+        data = g.db[app.config['MONGODB_COLLECTION']].update_one({"type": configtype},
                                           {"$set": ddict}, upsert=True)
         result['rest']['matched_count'] = data.matched_count
         result['rest']['modified_count'] = data.modified_count
         result['rest']['upserted_id'] = str(data.upserted_id)
         result['rest']['updated' if data.matched_count else 'inserted'] = 1
     except Exception as ex:
-        template = "An exception of type {0} occurred. Arguments:{1!r}"
-        message = template.format(type(ex).__name__, ex.args)
+        message = TEMPLATE.format(type(ex).__name__, ex.args)
         raise InvalidUsage(f"Could not import configuration for {configtype}: {message}")
     # Export
     eresult = initialize_result()
-    config_from_mongo(eresult, configtype, 0)
+    config_from_mongo(eresult, configtype, False)
     dump_to_file(configtype, eresult)
     result['config'] = new_config
     result['rest']['config_length'] = len(result['config'])
