@@ -39,7 +39,5 @@ To run on production:
 7. The API is now available at `http://your-hostname/`. Opening this url in your browser will bring up the API documentation.
 
 
-##Author Information
-Written by Rob Svirskas (<svirskasr@janelia.hhmi.org>)
-
+Rob Svirskas (<svirskasr@janelia.hhmi.org>)
 [Scientific Computing](http://www.janelia.org/research-resources/computing-resources)  
