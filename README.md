@@ -11,8 +11,7 @@ to run.
 To run on production:
 
     ```
-    restart_production.sh
-
+    sh restart_prod.sh
     ```
     
 ## Installation
